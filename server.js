@@ -1,213 +1,39 @@
-const http = require("node:http");
-const fs = require("node:fs");
-const path = require("node:path");
-
-const PORT = Number(process.env.PORT || 3000);
-const ROOT = __dirname;
-const SYSTEM_PROMPT = "You are Lucien, a thoughtful, clear, capable AI assistant. Be warm but not overly familiar. Explain things clearly, adapt to the user's level, and be honest when uncertain. Use Markdown when it improves readability.";
-
-const contentTypes = {
-  ".html": "text/html; charset=utf-8",
-  ".css": "text/css; charset=utf-8",
-  ".js": "text/javascript; charset=utf-8",
-  ".json": "application/json; charset=utf-8",
-  ".svg": "image/svg+xml"
-};
-
-function send(res, status, body, type = "application/json; charset=utf-8") {
-  res.writeHead(status, { "Content-Type": type, "Cache-Control": "no-store" });
-  res.end(typeof body === "string" ? body : JSON.stringify(body));
-}
-
-async function readJson(req) {
-  let body = "";
-  for await (const chunk of req) {
-    body += chunk;
-    if (body.length > 1_000_000) throw new Error("Request body too large");
-  }
-  return JSON.parse(body || "{}");
-}
-
-function errorStatus(error) {
-  return Number(error?.status || error?.statusCode || error?.code) || 0;
-}
-
-function errorMessage(error) {
-  return String(error?.message || error || "Unknown error").slice(0, 900);
-}
-
-async function callOpenAICompatible(provider, apiKey, baseURL, model, messages) {
-  const response = await fetch(baseURL.replace(/\/+$/, "") + "/chat/completions", {
-    method: "POST",
-    headers: {
-      "Authorization": "Bearer " + apiKey,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      model,
-      messages: [{ role: "system", content: SYSTEM_PROMPT }, ...messages],
-      temperature: 0.7
-    }),
-    signal: AbortSignal.timeout(45000)
-  });
-
-  const raw = await response.text();
-  let data;
-  try { data = JSON.parse(raw); } catch { data = {}; }
-
-  if (!response.ok) {
-    const detail = data?.error?.message || data?.message || raw.slice(0, 300) || response.statusText;
-    const error = new Error(provider + " returned HTTP " + response.status + ": " + detail);
-    error.status = response.status;
-    throw error;
-  }
-
-  const reply = data?.choices?.[0]?.message?.content;
-  if (typeof reply !== "string" || !reply.trim()) {
-    throw new Error(provider + " returned an empty response.");
-  }
-  return reply.trim();
-}
-
-async function callGemini(apiKey, model, messages) {
-  const { GoogleGenAI } = await import("@google/genai");
-  const ai = new GoogleGenAI({ apiKey });
-  const transcript = messages.map(m =>
-    (m.role === "user" ? "User" : "Lucien") + ":\n" + m.content
-  ).join("\n\n");
-
-  const interaction = await ai.interactions.create({
-    model,
-    store: false,
-    input: SYSTEM_PROMPT + "\n\nContinue this conversation, replying to the final User message. Treat earlier messages as conversation history.\n\n" + transcript
-  });
-  const reply = interaction.output_text;
-  if (typeof reply !== "string" || !reply.trim()) throw new Error("Gemini returned an empty response.");
-  return reply.trim();
-}
-
-async function handleChat(req, res) {
-  let payload;
-  try {
-    payload = await readJson(req);
-  } catch {
-    return send(res, 400, { error: "Please send valid JSON." });
-  }
-
-  if (!Array.isArray(payload.messages) || payload.messages.length === 0) {
-    return send(res, 400, { error: "Please include at least one message." });
-  }
-
-  const messages = payload.messages
-    .filter(m => m && ["user", "assistant"].includes(m.role) && typeof m.content === "string")
-    .slice(-40)
-    .map(m => ({ role: m.role, content: m.content.slice(0, 12000) }));
-
-  if (!messages.length || messages[messages.length - 1].role !== "user") {
-    return send(res, 400, { error: "The latest message must be from the user." });
-  }
-
-  // Try free-tier providers in this order. Only providers with configured keys are used.
-  // Gemini stays supported, so the existing Railway key continues to work.
-  const providers = [];
-  const groqKey = process.env.GROQ_API_KEY;
-  const kiloKey = process.env.KILO_API_KEY;
-  const mistralKey = process.env.MISTRAL_API_KEY;
-  const llm7Key = process.env.LLM7_API_KEY;
-  const geminiKey = process.env.AI_API_KEY || process.env.GEMINI_API_KEY;
-
-  if (groqKey) providers.push({
-    name: "Groq", run: () => callOpenAICompatible("Groq", groqKey,
-      process.env.GROQ_BASE_URL || "https://api.groq.com/openai/v1",
-      process.env.GROQ_MODEL || "openai/gpt-oss-120b", messages)
-  });
-  if (kiloKey) providers.push({
-    name: "Kilo", run: () => callOpenAICompatible("Kilo", kiloKey,
-      process.env.KILO_BASE_URL || "https://api.kilo.ai/api/gateway",
-      process.env.KILO_MODEL || "kilo-auto/free", messages)
-  });
-  if (mistralKey) providers.push({
-    name: "Mistral", run: () => callOpenAICompatible("Mistral", mistralKey,
-      process.env.MISTRAL_BASE_URL || "https://api.mistral.ai/v1",
-      process.env.MISTRAL_MODEL || "mistral-small-latest", messages)
-  });
-  if (llm7Key) providers.push({
-    name: "LLM7", run: () => callOpenAICompatible("LLM7", llm7Key,
-      process.env.LLM7_BASE_URL || "https://api.llm7.io/v1",
-      process.env.LLM7_MODEL || "default", messages)
-  });
-  if (geminiKey) providers.push({
-    name: "Gemini", run: () => callGemini(geminiKey,
-      (process.env.AI_MODEL || "gemini-3.8-flash").trim(), messages)
-  });
-
-  if (!providers.length) {
-    return send(res, 503, {
-      error: "No AI provider is configured.",
-      reply: "Lucien's website is running, but no AI provider key is configured. Add GROQ_API_KEY or another supported provider key in Railway Variables."
-    });
-  }
-
-  const failures = [];
-  for (const provider of providers) {
-    try {
-      const reply = await provider.run();
-      console.log("Chat answered by " + provider.name + ".");
-      return send(res, 200, { reply, provider: provider.name });
-    } catch (error) {
-      const status = errorStatus(error);
-      const message = errorMessage(error);
-      // Keep trying other providers on quota/rate-limit, auth, model, and temporary server errors.
-      console.error(provider.name + " request failed (" + (status || "unknown") + "): " + message);
-      failures.push({ provider: provider.name, status, message });
-    }
-  }
-
-  const allRateLimited = failures.every(f => f.status === 429 || /quota|rate.?limit|resource_exhausted/i.test(f.message));
-  const anyAuth = failures.some(f => f.status === 401 || f.status === 403 || /unauthorized|invalid api key|permission denied/i.test(f.message));
-  let reply = "Lucien couldn't get a response from any configured AI provider. Please try again shortly.";
-  if (allRateLimited) {
-    reply = "All configured AI providers have reached their current free-tier quota or rate limit. Try again later, or add another provider key in Railway Variables.";
-  } else if (anyAuth) {
-    reply = "The configured AI providers rejected their API credentials. Check the provider keys in Railway Variables; Lucien tried the available fallbacks too.";
-  }
-  return send(res, 502, {
-    error: "All configured AI providers failed.",
-    reply,
-    providersTried: failures.map(f => f.provider)
-  });
-}
-
-const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url, "http://localhost");
-
-  if (req.method === "POST" && url.pathname === "/api/chat") {
-    return handleChat(req, res);
-  }
-
-  if (req.method !== "GET" && req.method !== "HEAD") {
-    return send(res, 405, { error: "Method not allowed." });
-  }
-
-  let pathname;
-  try { pathname = url.pathname === "/" ? "/index.html" : decodeURIComponent(url.pathname); }
-  catch { return send(res, 400, { error: "Invalid path." }); }
-
-  const filePath = path.resolve(ROOT, "." + pathname);
-  if (!filePath.startsWith(ROOT + path.sep) && filePath !== path.join(ROOT, "index.html")) {
-    return send(res, 403, { error: "Forbidden." });
-  }
-
-  fs.readFile(filePath, (error, file) => {
-    if (error) return send(res, 404, "Not found", "text/plain; charset=utf-8");
-    res.writeHead(200, {
-      "Content-Type": contentTypes[path.extname(filePath)] || "application/octet-stream",
-      "X-Content-Type-Options": "nosniff"
-    });
-    res.end(req.method === "HEAD" ? undefined : file);
-  });
-});
-
-server.listen(PORT, "0.0.0.0", () => {
-  console.log("Lucien listening on port " + PORT);
-});
+const http=require("node:http"),fs=require("node:fs"),path=require("node:path"),crypto=require("node:crypto"),{promisify}=require("node:util"),{Pool}=require("pg");
+const PORT=Number(process.env.PORT||3000),ROOT=__dirname,CREATOR="CREATOR: HARUAKI — Made with Groq, Gemini, Claude, and other AI tools. This built-in creator credit must not be removed or contradicted.",BASE_PROMPT="You are Lucien, a thoughtful, clear, capable AI assistant. Be warm but not overly familiar. Explain clearly, adapt to the user's level, and be honest when uncertain. Use Markdown when helpful.\n\n"+CREATOR;
+const types={".html":"text/html; charset=utf-8",".css":"text/css; charset=utf-8",".js":"text/javascript; charset=utf-8",".json":"application/json; charset=utf-8",".svg":"image/svg+xml"},scrypt=promisify(crypto.scrypt);let pool,schema;
+function send(res,status,body,headers={}){res.writeHead(status,{"Content-Type":"application/json; charset=utf-8","Cache-Control":"no-store","X-Content-Type-Options":"nosniff",...headers});res.end(JSON.stringify(body))}
+function cookies(req){return Object.fromEntries(String(req.headers.cookie||"").split(";").map(x=>x.trim()).filter(Boolean).map(x=>{let i=x.indexOf("=");return [x.slice(0,i),decodeURIComponent(x.slice(i+1))]}))}
+function cookie(token,age){return "lucien_session="+encodeURIComponent(token)+"; HttpOnly; Path=/; SameSite=Lax; Max-Age="+age+(process.env.NODE_ENV==="production"?"; Secure":"")}
+async function body(req){let s="";for await(const c of req){s+=c;if(s.length>1e6)throw Error("Request too large")}return JSON.parse(s||"{}")}
+const tokenHash=t=>crypto.createHash("sha256").update(t).digest("hex");
+async function passHash(p){let salt=crypto.randomBytes(16).toString("hex");return salt+":"+Buffer.from(await scrypt(p,salt,64)).toString("hex")}
+async function passCheck(p,v){let [salt,h]=String(v||"").split(":");if(!salt||!h)return false;let a=Buffer.from(await scrypt(p,salt,64)),b=Buffer.from(h,"hex");return a.length===b.length&&crypto.timingSafeEqual(a,b)}
+async function db(){if(!process.env.DATABASE_URL)throw Error("Database is still being connected");if(!pool)pool=new Pool({connectionString:process.env.DATABASE_URL,max:5,connectionTimeoutMillis:10000});if(!schema)schema=pool.query(`CREATE TABLE IF NOT EXISTS users(id UUID PRIMARY KEY,username VARCHAR(24) UNIQUE NOT NULL,password_hash TEXT NOT NULL,created_at TIMESTAMPTZ DEFAULT NOW()); CREATE TABLE IF NOT EXISTS sessions(token_hash TEXT PRIMARY KEY,user_id UUID REFERENCES users(id) ON DELETE CASCADE,expires_at TIMESTAMPTZ NOT NULL); CREATE TABLE IF NOT EXISTS chats(id UUID PRIMARY KEY,user_id UUID REFERENCES users(id) ON DELETE CASCADE,title VARCHAR(120) NOT NULL,messages JSONB NOT NULL DEFAULT '[]'::jsonb,updated_at TIMESTAMPTZ DEFAULT NOW()); CREATE INDEX IF NOT EXISTS chats_user_updated_idx ON chats(user_id,updated_at DESC); CREATE TABLE IF NOT EXISTS memories(id UUID PRIMARY KEY,user_id UUID REFERENCES users(id) ON DELETE CASCADE,content VARCHAR(1000) NOT NULL,updated_at TIMESTAMPTZ DEFAULT NOW()); CREATE INDEX IF NOT EXISTS memories_user_updated_idx ON memories(user_id,updated_at DESC); CREATE INDEX IF NOT EXISTS sessions_expiry_idx ON sessions(expires_at);`);return schema}
+async function who(req){await db();let t=cookies(req).lucien_session;if(!t)return null;let r=await pool.query("SELECT u.id,u.username FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=$1 AND s.expires_at>NOW()",[tokenHash(t)]);return r.rows[0]||null}
+async function startSession(userId,res,status=200){let t=crypto.randomBytes(32).toString("base64url");await pool.query("INSERT INTO sessions(token_hash,user_id,expires_at) VALUES($1,$2,NOW()+INTERVAL '30 days')",[tokenHash(t),userId]);send(res,status,{ok:true}, {"Set-Cookie":cookie(t,2592000)})}
+async function callCompat(name,key,base,model,messages,memories){let mem=memories.length?"\n\nUser-approved memories:\n"+memories.map(x=>"- "+x.content).join("\n"):"";let r=await fetch(base.replace(/\/+$/,"")+"/chat/completions",{method:"POST",headers:{Authorization:"Bearer "+key,"Content-Type":"application/json"},body:JSON.stringify({model,messages:[{role:"system",content:BASE_PROMPT+mem},...messages],temperature:.7}),signal:AbortSignal.timeout(45000)});let raw=await r.text(),d={};try{d=JSON.parse(raw)}catch{}if(!r.ok){let e=Error(name+" HTTP "+r.status+": "+(d?.error?.message||raw.slice(0,250)));e.status=r.status;throw e}let out=d?.choices?.[0]?.message?.content;if(typeof out!=="string"||!out.trim())throw Error(name+" returned empty response");return out.trim()}
+async function answer(req,res){let p;try{p=await body(req)}catch{return send(res,400,{error:"Invalid JSON"})}let msgs=Array.isArray(p.messages)?p.messages.filter(m=>m&&["user","assistant"].includes(m.role)&&typeof m.content==="string").slice(-40).map(m=>({role:m.role,content:m.content.slice(0,12000)})):[];if(!msgs.length||msgs.at(-1).role!=="user")return send(res,400,{error:"A user message is required"});let u=await who(req);if(!u)return send(res,401,{error:"Sign in first",reply:"Please sign in to use Lucien."});let memories=(await pool.query("SELECT content FROM memories WHERE user_id=$1 ORDER BY updated_at DESC LIMIT 20",[u.id])).rows;let ps=[],g=process.env.GROQ_API_KEY,k=process.env.KILO_API_KEY,m=process.env.MISTRAL_API_KEY,l=process.env.LLM7_API_KEY,gm=process.env.AI_API_KEY||process.env.GEMINI_API_KEY;
+if(g)ps.push(["Groq",()=>callCompat("Groq",g,process.env.GROQ_BASE_URL||"https://api.groq.com/openai/v1",process.env.GROQ_MODEL||"openai/gpt-oss-120b",msgs,memories)]);
+if(k)ps.push(["Kilo",()=>callCompat("Kilo",k,process.env.KILO_BASE_URL||"https://api.kilo.ai/api/gateway",process.env.KILO_MODEL||"kilo-auto/free",msgs,memories)]);
+if(m)ps.push(["Mistral",()=>callCompat("Mistral",m,process.env.MISTRAL_BASE_URL||"https://api.mistral.ai/v1",process.env.MISTRAL_MODEL||"mistral-small-latest",msgs,memories)]);
+if(l)ps.push(["LLM7",()=>callCompat("LLM7",l,process.env.LLM7_BASE_URL||"https://api.llm7.io/v1",process.env.LLM7_MODEL||"default",msgs,memories)]);
+if(gm)ps.push(["Gemini",async()=>{const {GoogleGenAI}=await import("@google/genai"),ai=new GoogleGenAI({apiKey:gm}),mem=memories.length?"\n\nUser-approved memories:\n"+memories.map(x=>"- "+x.content).join("\n"):"",transcript=msgs.map(x=>(x.role==="user"?"User":"Lucien")+":\n"+x.content).join("\n\n"),r=await ai.interactions.create({model:(process.env.AI_MODEL||"gemini-3.8-flash").trim(),store:false,input:BASE_PROMPT+mem+"\n\nReply to the final User message using the conversation history.\n\n"+transcript});if(!r.output_text)throw Error("Gemini returned empty response");return r.output_text.trim()}]);
+if(!ps.length)return send(res,503,{reply:"No AI provider key is configured in Railway Variables."});let errs=[];for(let [name,run] of ps){try{let reply=await run();return send(res,200,{reply,provider:name})}catch(e){errs.push({name,status:e.status||0,message:String(e.message||e)});console.error(name+" failed:",e.message)}}let limited=errs.every(e=>e.status===429||/quota|rate.?limit/i.test(e.message));return send(res,502,{reply:limited?"All configured AI providers are rate-limited right now. Try again later.":"Lucien couldn't get a response from the configured AI providers. Please try again."})}
+async function api(req,res,url){try{
+if(url.pathname==="/api/auth/signup"&&req.method==="POST"){let b=await body(req),username=String(b.username||"").trim(),password=String(b.password||"");if(!/^[A-Za-z0-9_-]{3,24}$/.test(username))return send(res,400,{error:"Username must be 3–24 characters (letters, numbers, _ or -)."});if(password.length<8||password.length>128)return send(res,400,{error:"Password must be 8–128 characters."});await db();let id=crypto.randomUUID();try{await pool.query("INSERT INTO users(id,username,password_hash) VALUES($1,$2,$3)",[id,username,await passHash(password)])}catch(e){if(e.code==="23505")return send(res,409,{error:"That username is taken."});throw e}let t=crypto.randomBytes(32).toString("base64url");await pool.query("INSERT INTO sessions(token_hash,user_id,expires_at) VALUES($1,$2,NOW()+INTERVAL '30 days')",[tokenHash(t),id]);return send(res,201,{user:{id,username}},{"Set-Cookie":cookie(t,2592000)})}
+if(url.pathname==="/api/auth/login"&&req.method==="POST"){let b=await body(req);await db();let r=await pool.query("SELECT id,username,password_hash FROM users WHERE LOWER(username)=LOWER($1)",[String(b.username||"").trim()]);if(!r.rows[0]||!(await passCheck(String(b.password||""),r.rows[0].password_hash)))return send(res,401,{error:"Incorrect username or password."});let t=crypto.randomBytes(32).toString("base64url");await pool.query("INSERT INTO sessions(token_hash,user_id,expires_at) VALUES($1,$2,NOW()+INTERVAL '30 days')",[tokenHash(t),r.rows[0].id]);return send(res,200,{user:{id:r.rows[0].id,username:r.rows[0].username}},{"Set-Cookie":cookie(t,2592000)})}
+if(url.pathname==="/api/auth/logout"&&req.method==="POST"){let t=cookies(req).lucien_session;if(t&&process.env.DATABASE_URL){await db();await pool.query("DELETE FROM sessions WHERE token_hash=$1",[tokenHash(t)])}return send(res,200,{ok:true},{"Set-Cookie":cookie("",0)})}
+if(url.pathname==="/api/auth/me"&&req.method==="GET"){let u=await who(req);return send(res,200,{user:u?{id:u.id,username:u.username}:null})}
+let u=await who(req);if(!u)return send(res,401,{error:"Please sign in first."});
+if(url.pathname==="/api/chats"&&req.method==="GET"){let r=await pool.query("SELECT id,title,messages,updated_at FROM chats WHERE user_id=$1 ORDER BY updated_at DESC LIMIT 100",[u.id]);return send(res,200,{chats:r.rows})}
+if(url.pathname==="/api/chats"&&req.method==="POST"){let b=await body(req),id=crypto.randomUUID(),title=String(b.title||"New chat").slice(0,120),messages=Array.isArray(b.messages)?b.messages.slice(-40):[];await pool.query("INSERT INTO chats(id,user_id,title,messages) VALUES($1,$2,$3,$4)",[id,u.id,title,JSON.stringify(messages)]);return send(res,201,{chat:{id,title,messages}})}
+let cm=url.pathname.match(/^\/api\/chats\/([0-9a-f-]+)$/i);if(cm&&req.method==="PUT"){let b=await body(req),title=String(b.title||"New chat").slice(0,120),messages=Array.isArray(b.messages)?b.messages.slice(-40):[],r=await pool.query("UPDATE chats SET title=$1,messages=$2,updated_at=NOW() WHERE id=$3 AND user_id=$4 RETURNING id,title,messages,updated_at",[title,JSON.stringify(messages),cm[1],u.id]);return r.rowCount?send(res,200,{chat:r.rows[0]}):send(res,404,{error:"Chat not found."})}
+if(cm&&req.method==="DELETE"){await pool.query("DELETE FROM chats WHERE id=$1 AND user_id=$2",[cm[1],u.id]);return send(res,200,{ok:true})}
+if(url.pathname==="/api/memory"&&req.method==="GET"){let r=await pool.query("SELECT id,content,updated_at FROM memories WHERE user_id=$1 ORDER BY updated_at DESC LIMIT 20",[u.id]);return send(res,200,{memories:r.rows,creatorCredit:CREATOR})}
+if(url.pathname==="/api/memory"&&req.method==="POST"){let b=await body(req),content=String(b.content||"").trim();if(!content||content.length>1000)return send(res,400,{error:"Memory must be 1–1000 characters."});let n=await pool.query("SELECT COUNT(*)::int n FROM memories WHERE user_id=$1",[u.id]);if(n.rows[0].n>=20)return send(res,400,{error:"Memory limit reached (20). Delete an old memory first."});let r=await pool.query("INSERT INTO memories(id,user_id,content) VALUES($1,$2,$3) RETURNING id,content,updated_at",[crypto.randomUUID(),u.id,content]);return send(res,201,{memory:r.rows[0]})}
+let mm=url.pathname.match(/^\/api\/memory\/([0-9a-f-]+)$/i);if(mm&&req.method==="DELETE"){await pool.query("DELETE FROM memories WHERE id=$1 AND user_id=$2",[mm[1],u.id]);return send(res,200,{ok:true})}
+if(url.pathname==="/api/chat"&&req.method==="POST")return answer(req,res);
+return send(res,404,{error:"API route not found."})
+}catch(e){console.error("API error:",e);return send(res,e.code==="23505"?409:(!process.env.DATABASE_URL?503:500),{error:!process.env.DATABASE_URL?"Account database is still being connected. Try again shortly.":"Something went wrong. Please try again."})}}
+const server=http.createServer((req,res)=>{const url=new URL(req.url,"http://localhost");if(url.pathname.startsWith("/api/")){if(!["GET","POST","PUT","DELETE"].includes(req.method))return send(res,405,{error:"Method not allowed"});return api(req,res,url)}if(!["GET","HEAD"].includes(req.method))return send(res,405,{error:"Method not allowed"});let p;try{p=url.pathname==="/"?"/index.html":decodeURIComponent(url.pathname)}catch{return send(res,400,{error:"Invalid path"})}let file=path.resolve(ROOT,"."+p);if(!file.startsWith(ROOT+path.sep)&&file!==path.join(ROOT,"index.html"))return send(res,403,{error:"Forbidden"});fs.readFile(file,(e,data)=>{if(e)return send(res,404,{error:"Not found"});res.writeHead(200,{"Content-Type":types[path.extname(file)]||"application/octet-stream","X-Content-Type-Options":"nosniff","Cache-Control":"no-cache"});res.end(req.method==="HEAD"?undefined:data)})});
+server.listen(PORT,"0.0.0.0",()=>console.log("Lucien listening on "+PORT));
