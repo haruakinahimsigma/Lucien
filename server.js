@@ -28,14 +28,13 @@ async function readJson(req) {
 }
 
 async function handleChat(req, res) {
-  const apiKey = process.env.AI_API_KEY;
-  const baseUrl = (process.env.AI_BASE_URL || "https://api.openai.com/v1").replace(/\/+$/, "");
-  const model = process.env.AI_MODEL || "gpt-4o-mini";
+  const apiKey = process.env.AI_API_KEY || process.env.GEMINI_API_KEY;
+  const model = (process.env.AI_MODEL || "gemini-3.8-flash").trim();
 
   if (!apiKey) {
     return send(res, 503, {
       error: "AI is not configured yet.",
-      reply: "Lucien’s interface is running, but its AI model is not connected yet. Add AI_API_KEY in your hosting environment variables, then restart the service."
+      reply: "Lucien's interface is running, but its Gemini API key is missing. Add AI_API_KEY in Railway's environment variables."
     });
   }
 
@@ -60,46 +59,50 @@ async function handleChat(req, res) {
   }
 
   try {
-    const upstream = await fetch(baseUrl + "/chat/completions", {
-      method: "POST",
-      headers: {
-        "Authorization": "Bearer " + apiKey,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        model,
-        messages: [
-          {
-            role: "system",
-            content: "You are Lucien, a thoughtful, clear, calm, capable AI assistant. Be warm but not overly familiar. Explain things clearly, adapt to the user's level, and be honest when you are uncertain. Use Markdown when it improves readability."
-          },
-          ...messages
-        ],
-        temperature: 0.7
-      }),
-      signal: AbortSignal.timeout(60000)
+    // Use Google's official SDK and the Interactions API from the AI Studio quickstart.
+    const { GoogleGenAI } = await import("@google/genai");
+    const ai = new GoogleGenAI({ apiKey });
+
+    const transcript = messages.map(m =>
+      (m.role === "user" ? "User" : "Lucien") + ":\n" + m.content
+    ).join("\n\n");
+
+    const interaction = await ai.interactions.create({
+      model,
+      store: false,
+      input:
+        "You are Lucien, a thoughtful, clear, capable AI assistant. Be warm but not overly familiar. Explain things clearly, adapt to the user's level, and be honest when uncertain. Use Markdown when it improves readability.\n\n" +
+        "Continue this conversation, replying to the final User message. Treat earlier messages as conversation history.\n\n" +
+        transcript
     });
 
-    const data = await upstream.json().catch(() => ({}));
-    if (!upstream.ok) {
-      console.error("AI provider error:", upstream.status, data.error?.message || "Unknown error");
-      return send(res, 502, {
-        error: "The AI provider returned an error.",
-        reply: "I couldn’t get a response from the AI provider just now. Check the model name and API settings, then try again."
-      });
-    }
-
-    const reply = data.choices?.[0]?.message?.content;
+    const reply = interaction.output_text;
     if (typeof reply !== "string" || !reply.trim()) {
-      return send(res, 502, { error: "The AI provider returned an empty response." });
+      console.error("Gemini Interactions API returned no output text.");
+      return send(res, 502, {
+        error: "Gemini returned an empty response.",
+        reply: "Gemini returned an empty response. Please try again."
+      });
     }
     return send(res, 200, { reply: reply.trim() });
   } catch (error) {
-    console.error("AI request failed:", error.message);
-    return send(res, 504, {
-      error: "The AI request failed or timed out.",
-      reply: "That request didn’t go through. Please try again in a moment."
-    });
+    // Log the provider error for debugging, never log the API key.
+    const status = error?.status || error?.code || "unknown";
+    const message = String(error?.message || error || "Unknown error").slice(0, 1200);
+    console.error("Gemini Interactions API error:", status, message);
+
+    const lower = message.toLowerCase();
+    let reply = "Lucien couldn't get a response from Gemini just now. Please try again shortly.";
+    if (lower.includes("api key") || lower.includes("unauthorized") || lower.includes("permission denied") || status === 401 || status === 403) {
+      reply = "Gemini rejected the API credentials or permissions. Check that AI_API_KEY in Railway is a valid Gemini API key from Google AI Studio.";
+    } else if (lower.includes("quota") || lower.includes("resource_exhausted") || status === 429) {
+      reply = "Gemini's API quota or rate limit was reached. Check usage and limits in Google AI Studio, then try again later.";
+    } else if (lower.includes("not found") || status === 404) {
+      reply = "Gemini couldn't find that model or API endpoint. Check the AI_MODEL value in Railway.";
+    } else if (status === 503 || lower.includes("unavailable")) {
+      reply = "Gemini is temporarily unavailable. Wait a little and try again.";
+    }
+    return send(res, 502, { error: "Gemini request failed.", reply });
   }
 }
 
