@@ -1,0 +1,12 @@
+{
+  "name": "lucien",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Lucien — a calm, minimal AI chat interface",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
