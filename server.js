@@ -51,7 +51,7 @@ async function learnMemories(userId,conversation,existing){
 async function fetchModelChoices(){let models=[];const add=(id,name)=>{if(id&&!models.some(x=>x.id===id))models.push({id,name})};if(process.env.GROQ_API_KEY){let current=process.env.GROQ_MODEL||"openai/gpt-oss-120b";add("groq:"+current,"Groq · "+current+" (configured)");for(let id of ["openai/gpt-oss-120b","llama-3.3-70b-versatile","llama-3.1-8b-instant"])add("groq:"+id,"Groq · "+id)}let gm=process.env.AI_API_KEY||process.env.GEMINI_API_KEY;if(gm)add("gemini:"+(process.env.AI_MODEL||"gemini-3.8-flash"),"Gemini · "+(process.env.AI_MODEL||"gemini-3.8-flash")+" (configured)");let enabled=!!process.env.OPENROUTER_API_KEY;if(enabled){try{let r=await fetch("https://openrouter.ai/api/v1/models",{headers:{Authorization:"Bearer "+process.env.OPENROUTER_API_KEY},signal:AbortSignal.timeout(8000)});if(!r.ok)throw Error("model list unavailable");let d=await r.json(),free=[{id:"openrouter:openrouter/free",name:"OpenRouter · Free model router"},...(d.data||[]).filter(x=>/:free$/.test(x.id)||((Number(x.pricing?.prompt)===0)&&(Number(x.pricing?.completion)===0))).map(x=>({id:"openrouter:"+x.id,name:"OpenRouter · "+(x.name||x.id)}))];free.sort((a,b)=>a.id==="openrouter:openrouter/free"?-1:b.id==="openrouter:openrouter/free"?1:a.name.localeCompare(b.name));for(let m of free.slice(0,80))add(m.id,m.name)}catch(e){console.error("OpenRouter model list failed:",e.message);add("openrouter:openrouter/free","OpenRouter · Free model router")}}return {models,openrouterEnabled:enabled}}
 function shouldSearchWeb(q){
  const s=String(q||"");
- const minecraftTopic=/\b(minecraft|the sift|minecraft live|java edition|bedrock edition)\b/i.test(s);
+ const minecraftTopic=/\b(minecraft|the sift|minecraft live|java edition|bedrock edition|new biome|new biomes)\b/i.test(s);
  const minecraftSpecific=/\b(sift|dimension|biomes?|snapshots?|mobs?|updates?|release|released|announced|announcement|features?|experimental|1\.\d+)\b/i.test(s);
  const currentIntent=/\b(latest|current|currently|today|tonight|yesterday|this week|this month|recent|breaking|news|weather|price|prices|president|prime minister|election|score|standings|release date|version|update|202[5-9]|202[0-9]|search the web|search online|look online|look it up|internet|sources|citations|fact.?check|who is the ceo|who is the president)\b/i.test(s)||/\bwhat happened to\b|\bhas .{2,50} happened\b/i.test(s);
  return (minecraftTopic&&minecraftSpecific)||currentIntent;
@@ -60,7 +60,7 @@ function buildSearchQuery(q){
  const s=String(q||"").trim().slice(0,300);
  let topic="";
  if(/\bthe\s+sift\b|\bsift\b/i.test(s)) topic='"The Sift" Minecraft dimension';
- else if(/\bbiomes?\b/i.test(s)&&/\bminecraft\b/i.test(s)) topic="Minecraft new biome official";
+ else if(/\bbiomes?\b/i.test(s)) topic="Minecraft new biome official";
  else if(/\bsnapshots?\b/i.test(s)&&/\bminecraft\b/i.test(s)) topic="Minecraft Java snapshot official";
  else if(/\bdimensions?\b/i.test(s)&&/\bminecraft\b/i.test(s)) topic="Minecraft new dimension official";
  else if(/\bmobs?\b/i.test(s)&&/\bminecraft\b/i.test(s)) topic="Minecraft new mob official";
