@@ -96,30 +96,21 @@ async function searchWeb(query){
  const all=[];
  for(const q of queries){
   let results=[];
-  if(process.env.BRAVE_SEARCH_API_KEY){
-   try{
-    const recent=/\b(now|right now|today|this week|last 7 days|past 7 days|past week|recent|latest|current|happening|news|breaking)\b/i.test(query);
-    const params=new URLSearchParams({q,count:"6"});
-    if(recent)params.set("freshness","pw");
-    const r=await fetch("https://api.search.brave.com/res/v1/web/search?"+params.toString(),{headers:{"X-Subscription-Token":process.env.BRAVE_SEARCH_API_KEY,"Accept":"application/json"},signal:AbortSignal.timeout(9000)});
-    if(r.ok){const d=await r.json();results=(d.web?.results||[]).slice(0,6).map(x=>({title:x.title,url:x.url,description:x.description})).filter(x=>x.url&&/^https?:\/\//i.test(x.url));}
-    else console.error("Brave search returned HTTP "+r.status);
-   }catch(e){console.error("Brave search failed:",e.message)}
-  }
-  if(!results.length){
-   try{
-    const r=await fetch("https://html.duckduckgo.com/html/?q="+encodeURIComponent(q),{headers:{"User-Agent":"Mozilla/5.0 (compatible; LucienAI/1.0)","Accept":"text/html"},signal:AbortSignal.timeout(10000)});
-    if(!r.ok)throw Error("DuckDuckGo HTTP "+r.status);
-    const html=await r.text(),re=/<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;let m;
-    while((m=re.exec(html))&&results.length<6){
-     let url=m[1].replace(/&amp;/g,"&");if(url.startsWith("//"))url="https:"+url;
-     try{const u=new URL(url);if(u.hostname.includes("duckduckgo.com")&&u.searchParams.has("uddg"))url=decodeURIComponent(u.searchParams.get("uddg"))}catch{}
-     if(!/^https?:\/\//i.test(url))continue;
-     const rest=html.slice(re.lastIndex,re.lastIndex+1500),sm=rest.match(/class="result__snippet"[^>]*>([\s\S]*?)<\/td>/i)||rest.match(/class="result__snippet"[^>]*>([\s\S]*?)<\/a>/i);
-     results.push({title:decodeHtml(m[2]),url,description:sm?decodeHtml(sm[1]):""});
-    }
-   }catch(e){console.error("DuckDuckGo search failed:",e.message)}
-  }
+  try{
+   const recent=/\b(now|right now|today|this week|last 7 days|past 7 days|past week|recent|latest|current|happening|news|breaking)\b/i.test(query);
+   const params=new URLSearchParams({q,count:"8"});
+   if(recent)params.set("df","w");
+   const r=await fetch("https://html.duckduckgo.com/html/?"+params.toString(),{headers:{"User-Agent":"Mozilla/5.0 (compatible; LucienAI/1.0)","Accept":"text/html"},signal:AbortSignal.timeout(10000)});
+   if(!r.ok)throw Error("DuckDuckGo HTTP "+r.status);
+   const html=await r.text(),re=/<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;let m;
+   while((m=re.exec(html))&&results.length<8){
+    let url=m[1].replace(/&amp;/g,"&");if(url.startsWith("//"))url="https:"+url;
+    try{const u=new URL(url);if(u.hostname.includes("duckduckgo.com")&&u.searchParams.has("uddg"))url=decodeURIComponent(u.searchParams.get("uddg"))}catch{}
+    if(!/^https?:\/\//i.test(url))continue;
+    const rest=html.slice(re.lastIndex,re.lastIndex+1500),sm=rest.match(/class="result__snippet"[^>]*>([\s\S]*?)<\/td>/i)||rest.match(/class="result__snippet"[^>]*>([\s\S]*?)<\/a>/i);
+    results.push({title:decodeHtml(m[2]),url,description:sm?decodeHtml(sm[1]):""});
+   }
+  }catch(e){console.error("DuckDuckGo search failed:",e.message)}
   all.push(...results);
  }
  const seen=new Set();
