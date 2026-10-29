@@ -66,13 +66,15 @@ function shouldSearchWeb(q){
 }
 function buildSearchQuery(q){
  const s=String(q||"").trim().slice(0,300);
- const lower=s.toLowerCase();
- // Keep the user's real intent. Only add targeted official domains for Minecraft queries.
- if(/\b(the\s+sift|sift)\b/i.test(s)) return '"The Sift" Minecraft dimension '+s+' site:minecraft.net OR site:news.xbox.com';
- if(/\bbiomes?\b/i.test(s)&&/\bminecraft\b/i.test(s)) return s+' Minecraft biome official site:minecraft.net OR site:news.xbox.com';
- if(/\bsnapshots?\b/i.test(s)&&/\bminecraft\b/i.test(s)) return s+' Minecraft Java snapshot official site:minecraft.net';
- if(/\bdimensions?\b/i.test(s)&&/\bminecraft\b/i.test(s)) return s+' Minecraft dimension official site:minecraft.net OR site:news.xbox.com';
- if(/\bmobs?\b/i.test(s)&&/\bminecraft\b/i.test(s)) return s+' Minecraft mob official site:minecraft.net OR site:news.xbox.com';
+ if(/\\b(the\\s+sift|sift)\\b/i.test(s)) return '"The Sift" Minecraft dimension '+s+' site:minecraft.net OR site:news.xbox.com';
+ if(/\\bbiomes?\\b/i.test(s)&&/\\bminecraft\\b/i.test(s)) return s+' Minecraft biome official site:minecraft.net OR site:news.xbox.com';
+ if(/\\bsnapshots?\\b/i.test(s)&&/\\bminecraft\\b/i.test(s)) return s+' Minecraft Java snapshot official site:minecraft.net';
+ if(/\\bdimensions?\\b/i.test(s)&&/\\bminecraft\\b/i.test(s)) return s+' Minecraft dimension official site:minecraft.net OR site:news.xbox.com';
+ if(/\\bmobs?\\b/i.test(s)&&/\\bminecraft\\b/i.test(s)) return s+' Minecraft mob official site:minecraft.net OR site:news.xbox.com';
+ if(/\\b(ai|artificial intelligence)\\b/i.test(s)&&/\\b(news|developments|stories|last\\s+7\\s+days|past\\s+7\\s+days|past\\s+week|last\\s+week)\\b/i.test(s)){
+  const now=new Date(),endDate=now.toISOString().slice(0,10),startDate=new Date(now.getTime()-7*86400000).toISOString().slice(0,10);
+  return 'artificial intelligence AI company announcement news after:'+startDate+' before:'+endDate+' OR AI artificial intelligence news Reuters AP Bloomberg after:'+startDate+' OR site:openai.com/index OR site:anthropic.com/news OR site:blog.google/technology/ai AI announcement';
+ }
  return s;
 }
 function decodeHtml(s){return String(s||"").replace(/&amp;/g,"&").replace(/&quot;/g,'"').replace(/&#x27;|&#39;/g,"'").replace(/&lt;/g,"<").replace(/&gt;/g,">").replace(/<[^>]*>/g,"").trim()}
